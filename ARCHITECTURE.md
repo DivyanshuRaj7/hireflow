@@ -115,24 +115,13 @@ per item in `gaps` + `missing_or_unclear` (capped at 5, gaps prioritized),
 followed by exactly 2 strength_verification questions on JD-required skills the
 candidate has. Gap-validation questions always come first in the array. See
 PROMPTS.md section 4 for the exact rules.
-  "candidate_id": "string",
-  "summary_paragraph": "string",
-  "questions": [
-    {
-      "question": "string",
-      "targets_gap": "string",
-      "follow_ups": ["string", "string"]
-    }
-  ]
-}
-```
 
 ### 3.5 Interview-notes analysis (output of post-interview LLM call)
 ```json
 {
   "candidate_id": "string",
   "requirement_coverage": [
-    { "requirement": "string", "covered": true, "evidence": "string" }
+    { "requirement": "string", "covered": boolean, "evidence": "string" }
   ],
   "unanswered_areas": ["string"],
   "evaluation_report": "string"
