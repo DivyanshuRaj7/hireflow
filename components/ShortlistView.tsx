@@ -227,7 +227,7 @@ export default function ShortlistView() {
             screened · {buckets.strong_fit} Strong fit · {buckets.possible}{" "}
             Possible · {buckets.not_a_fit} Not a fit
           </p>
-          <ShortlistTable candidates={candidates} />
+          <ShortlistTable candidates={candidates} jdId={data.jd_id || jdId} />
         </>
       )}
 

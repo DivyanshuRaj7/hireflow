@@ -34,8 +34,10 @@ function experienceLabel(years: unknown): string {
 
 export default function ShortlistTable({
   candidates,
+  jdId,
 }: {
   candidates: StoredCandidateRow[];
+  jdId: string;
 }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-neutral-200 bg-white">
@@ -131,8 +133,8 @@ export default function ShortlistTable({
                 </td>
                 <td className="px-4 py-3 whitespace-nowrap">
                   <Link
-                    href={`/candidate/${encodeURIComponent(candidateId)}`}
-                    aria-label={`Open details for candidate ${candidateId} (coming in a later step)`}
+                    href={`/candidate/${encodeURIComponent(candidateId)}?jd_id=${encodeURIComponent(jdId)}`}
+                    aria-label={`Open details for candidate ${candidateId}`}
                     className="rounded-md px-2 py-1 text-sm font-semibold text-neutral-900 underline-offset-2 hover:underline"
                   >
                     View
