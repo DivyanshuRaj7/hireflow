@@ -1,17 +1,26 @@
+import UploadForm from "@/components/UploadForm";
+
+/**
+ * HireFlow upload screen (Part 2).
+ * The recruiter's entry point: role + JD + a batch of TXT resumes.
+ */
 export default function Home() {
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col items-center justify-center px-6 py-16">
-      <p className="text-sm font-medium tracking-wide text-neutral-500 uppercase">
-        HireFlow
-      </p>
-      <h1 className="mt-3 text-center text-3xl font-semibold tracking-tight text-neutral-900">
-        Frontend foundation is ready
-      </h1>
-      <p className="mt-3 max-w-md text-center text-base leading-relaxed text-neutral-600">
-        Upload, shortlist, and candidate detail screens arrive in later parts.
-        This page only confirms the Next.js + TypeScript + Tailwind setup builds
-        and renders.
-      </p>
+    <main className="mx-auto w-full max-w-3xl px-4 py-10 sm:px-6">
+      <header className="mb-6">
+        <p className="text-sm font-semibold tracking-wide text-neutral-500 uppercase">
+          HireFlow
+        </p>
+        <h1 className="mt-2 text-3xl font-semibold tracking-tight text-neutral-900">
+          Screen resumes against a job description
+        </h1>
+        <p className="mt-2 max-w-2xl text-base leading-relaxed text-neutral-600">
+          Give HireFlow a job description and a batch of resumes, and HireFlow
+          will screen them — ranked candidates with evidence you can inspect,
+          ready for your decision.
+        </p>
+      </header>
+      <UploadForm />
     </main>
   );
 }
