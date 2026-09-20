@@ -223,9 +223,11 @@ export default function ShortlistView() {
       ) : (
         <>
           <p aria-live="polite" className="text-sm text-neutral-600">
-            {candidates.length} candidate{candidates.length === 1 ? "" : "s"}{" "}
-            screened · {buckets.strong_fit} Strong fit · {buckets.possible}{" "}
-            Possible · {buckets.not_a_fit} Not a fit
+            <span className="font-semibold text-neutral-900">
+              {candidates.length} candidate{candidates.length === 1 ? "" : "s"} analyzed
+            </span>{" "}
+            · {buckets.strong_fit} strong · {buckets.possible}{" "}
+            possible · {buckets.not_a_fit} not a fit
           </p>
           <ShortlistTable candidates={candidates} jdId={data.jd_id || jdId} />
         </>

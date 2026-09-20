@@ -1,12 +1,13 @@
 "use client";
 
 /**
- * HireFlow upload + batch screening form (Part 2).
+ * HireFlow upload + batch screening form.
  *
- * Flow: role title + JD + multiple .txt resumes → validate → read each file
- * with FileReader.readAsText() → POST /api/ingest ONE resume at a time,
+ * Flow: role title + JD + multiple PDF/TXT resumes → validate → extract
+ * each file to plain text (TXT via FileReader.readAsText(), PDF via
+ * client-side pdf.js extraction) → POST /api/ingest ONE resume at a time,
  * SEQUENTIALLY (no Promise.all) → per-file ok/partial/failed state →
- * completion summary with a link to /results?jd_id=... (Part 3, not built).
+ * completion summary with a link to /results?jd_id=...
  *
  * The browser never talks to n8n directly and never sees webhook URLs.
  * No scoring, ranking, or candidate summarising happens here — the backend
@@ -22,10 +23,13 @@ type Phase = "idle" | "processing" | "complete";
 
 type FileStatus = "waiting" | "processing" | "completed" | "partial" | "failed";
 
+type ResumeKind = "PDF" | "TXT";
+
 interface ResumeItem {
   /** Stable within this upload session; sent as candidate_id. */
   candidateId: string;
   file: File;
+  kind: ResumeKind;
   status: FileStatus;
   /** Recruiter-friendly failure note, if any. */
   message?: string;
@@ -54,9 +58,9 @@ function slugify(value: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-/** Derive a safe candidate id from "name-03.txt" + index -> "name-03-3". */
+/** Derive a safe candidate id from "name-03.pdf" + index -> "name-03-3". */
 function candidateIdFor(fileName: string, index: number): string {
-  const stem = fileName.replace(/\.txt$/i, "");
+  const stem = fileName.replace(/\.(txt|pdf)$/i, "");
   const clean =
     stem
       .toLowerCase()
@@ -68,8 +72,11 @@ function candidateIdFor(fileName: string, index: number): string {
   return `${clean}-${index + 1}`;
 }
 
-function isTxtFile(file: File): boolean {
-  return file.name.toLowerCase().endsWith(".txt");
+function resumeKind(file: File): ResumeKind | null {
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".pdf")) return "PDF";
+  if (name.endsWith(".txt")) return "TXT";
+  return null;
 }
 
 /** Read one .txt file as plain text. The exact string becomes resume_text. */
@@ -84,9 +91,75 @@ function readFileAsText(file: File): Promise<string> {
   });
 }
 
+/**
+ * Extract plain text from a PDF entirely in the browser (pdf.js).
+ * The joined page text becomes resume_text — binary never leaves the page.
+ * Image-only/scanned PDFs yield no text and are reported, never invented.
+ */
+async function readPdfAsText(file: File): Promise<string> {
+  let pdfjs: typeof import("pdfjs-dist");
+  try {
+    pdfjs = await import("pdfjs-dist");
+  } catch {
+    throw new Error(`Couldn't extract text from this PDF (${file.name}).`);
+  }
+  if (!pdfjs.GlobalWorkerOptions.workerSrc) {
+    pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+      "pdfjs-dist/build/pdf.worker.min.mjs",
+      import.meta.url,
+    ).toString();
+  }
+  let doc: {
+    numPages: number;
+    destroy?: () => Promise<void>;
+  } | null = null;
+  try {
+    const data = await file.arrayBuffer();
+    const loadingTask = pdfjs.getDocument({ data });
+    const loaded = await loadingTask.promise;
+    doc = loaded as unknown as {
+      numPages: number;
+      destroy: () => Promise<void>;
+    };
+    const parts: string[] = [];
+    for (let pageNum = 1; pageNum <= doc.numPages; pageNum += 1) {
+      const page = await (
+        loaded as unknown as {
+          getPage: (n: number) => Promise<{
+            getTextContent: () => Promise<{ items: unknown[] }>;
+          }>;
+        }
+      ).getPage(pageNum);
+      const content = await page.getTextContent();
+      const line = content.items
+        .map((item) =>
+          typeof item === "object" && item !== null && "str" in item
+            ? String((item as { str: unknown }).str)
+            : "",
+        )
+        .join(" ");
+      parts.push(line);
+    }
+    return parts.join("\n").replace(/[ \t]+/g, " ").trim();
+  } catch {
+    throw new Error(`Couldn't extract text from this PDF (${file.name}).`);
+  } finally {
+    if (doc && typeof doc.destroy === "function") {
+      await doc.destroy().catch(() => undefined);
+    }
+  }
+}
+
+/** Whatever the format, the backend receives plain text as resume_text. */
+async function readResumeText(file: File, kind: ResumeKind): Promise<string> {
+  if (kind === "PDF") return readPdfAsText(file);
+  return readFileAsText(file);
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
-  return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 const STATUS_LABEL: Record<FileStatus, string> = {
@@ -135,6 +208,13 @@ export default function UploadForm() {
   const failedCount = items.filter((i) => i.status === "failed").length;
   const usableCount = completedCount + partialCount;
 
+  const ctaLabel =
+    items.length === 0
+      ? "Select Resumes"
+      : items.length === 1
+        ? "Analyze 1 Candidate →"
+        : `Analyze ${items.length} Candidates →`;
+
   function stopStageTicker() {
     if (stageTimerRef.current !== null) {
       clearInterval(stageTimerRef.current);
@@ -154,26 +234,32 @@ export default function UploadForm() {
 
   function addFiles(fileList: FileList | File[]) {
     const incoming = Array.from(fileList);
-    const valid = incoming.filter(isTxtFile);
-    const rejected = incoming.length - valid.length;
+    const supported: { file: File; kind: ResumeKind }[] = [];
+    let rejected = 0;
+    for (const file of incoming) {
+      const kind = resumeKind(file);
+      if (kind) supported.push({ file, kind });
+      else rejected += 1;
+    }
     setFileNotice(
       rejected > 0
-        ? `${rejected} file${rejected === 1 ? " was" : "s were"} skipped — HireFlow currently accepts TXT resumes only.`
+        ? `${rejected} file${rejected === 1 ? " was" : "s were"} skipped — unsupported file type. Please upload PDF or TXT.`
         : null,
     );
-    if (valid.length === 0) return;
+    if (supported.length === 0) return;
     setItems((prev) => {
       const seen = new Set(
         prev.map((i) => `${i.file.name}|${i.file.size}|${i.file.lastModified}`),
       );
       const next = [...prev];
-      for (const file of valid) {
+      for (const { file, kind } of supported) {
         const key = `${file.name}|${file.size}|${file.lastModified}`;
         if (seen.has(key)) continue;
         seen.add(key);
         next.push({
           candidateId: candidateIdFor(file.name, next.length),
           file,
+          kind,
           status: "waiting",
         });
       }
@@ -212,13 +298,11 @@ export default function UploadForm() {
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    if (isProcessing) return;
+    if (isProcessing || items.length === 0) return;
 
     const nextErrors: FormErrors = {};
     if (!title.trim()) nextErrors.title = "Enter the role title being screened.";
     if (!jd.trim()) nextErrors.jd = "Paste the job description for this role.";
-    if (items.length === 0)
-      nextErrors.files = "Select at least one TXT resume to screen.";
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length > 0) return;
 
@@ -252,8 +336,13 @@ export default function UploadForm() {
       startStageTicker();
 
       try {
-        const resumeText = await readFileAsText(item.file);
+        const resumeText = await readResumeText(item.file, item.kind);
         if (!resumeText.trim()) {
+          if (item.kind === "PDF") {
+            throw new Error(
+              `No readable text was found in this PDF (${item.file.name}).`,
+            );
+          }
           throw new Error(`${item.file.name} appears to be empty.`);
         }
         const res = await fetch("/api/ingest", {
@@ -349,7 +438,7 @@ export default function UploadForm() {
         className="flex flex-col gap-6"
       >
         {/* 1 — Role */}
-        <section className="rounded-lg border border-neutral-200 bg-white px-5 py-4">
+        <section className="rounded-lg border border-neutral-200 bg-white px-5 py-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
           <label
             htmlFor="hireflow-title"
             className="block text-sm font-semibold text-neutral-900"
@@ -383,7 +472,7 @@ export default function UploadForm() {
         </section>
 
         {/* 2 — Job description */}
-        <section className="rounded-lg border border-neutral-200 bg-white px-5 py-4">
+        <section className="rounded-lg border border-neutral-200 bg-white px-5 py-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
           <label
             htmlFor="hireflow-jd"
             className="block text-sm font-semibold text-neutral-900"
@@ -409,19 +498,22 @@ export default function UploadForm() {
         </section>
 
         {/* 3 — Resumes */}
-        <section className="rounded-lg border border-neutral-200 bg-white px-5 py-4">
+        <section
+          aria-label="Resumes"
+          className="rounded-lg border border-neutral-200 bg-white px-5 py-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)]"
+        >
           <div className="flex items-baseline justify-between gap-4">
-            <h2 className="text-sm font-semibold text-neutral-900">
+            <h2 className="text-sm font-semibold tracking-wide text-neutral-900 uppercase">
               Resumes{" "}
-              <span className="font-normal text-neutral-500">
-                · {items.length} selected · TXT only
+              <span className="font-normal text-neutral-500 normal-case">
+                · {items.length} selected · PDF and TXT supported
               </span>
             </h2>
             {items.length > 0 && !isProcessing && !isComplete && (
               <button
                 type="button"
                 onClick={clearFiles}
-                className="text-sm font-medium text-neutral-600 underline-offset-2 hover:underline"
+                className="shrink-0 text-sm font-medium text-neutral-600 underline-offset-2 hover:underline"
               >
                 Clear all
               </button>
@@ -440,31 +532,35 @@ export default function UploadForm() {
               if (isProcessing || isComplete) return;
               if (e.dataTransfer.files.length > 0) addFiles(e.dataTransfer.files);
             }}
-            className={`mt-3 rounded-md border-2 border-dashed px-4 py-8 text-center transition-colors ${
+            className={`mt-3 rounded-lg border-2 border-dashed px-4 py-10 text-center transition-colors ${
               dragActive
                 ? "border-neutral-900 bg-neutral-100"
-                : "border-neutral-300 bg-neutral-50"
+                : "border-neutral-300 bg-neutral-50 hover:border-neutral-400"
             }`}
           >
-            <p className="text-base font-medium text-neutral-900">
-              Drop TXT resumes here
+            <p className="text-lg font-semibold text-neutral-900">
+              Drop resumes here
             </p>
             <p className="mt-1 text-sm text-neutral-500">
-              Multiple resumes supported · or use the file picker below
+              or browse files · multiple resumes supported · PDF and TXT supported
             </p>
             <input
               ref={fileInputRef}
               type="file"
-              accept=".txt"
+              accept=".txt,.pdf"
               multiple
               disabled={isProcessing || isComplete}
               onChange={(e) => {
                 if (e.target.files) addFiles(e.target.files);
                 e.target.value = "";
               }}
-              aria-label="Choose TXT resumes"
-              className="mx-auto mt-4 block text-sm text-neutral-700 file:mr-3 file:rounded-md file:border file:border-neutral-300 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-neutral-900 disabled:opacity-50"
+              aria-label="Choose PDF or TXT resumes"
+              className="mx-auto mt-4 block text-sm text-neutral-700 file:mr-3 file:rounded-md file:border file:border-neutral-300 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-neutral-900 file:hover:bg-neutral-50 disabled:opacity-50"
             />
+            <p className="mt-2 text-xs text-neutral-500">
+              PDF text is extracted in your browser before screening — scanned,
+              image-only PDFs without readable text will be flagged, not guessed.
+            </p>
           </div>
 
           {fileNotice && (
@@ -479,39 +575,57 @@ export default function UploadForm() {
           )}
 
           {items.length > 0 && (
-            <ul aria-label="Selected resumes" className="mt-3 divide-y divide-neutral-200 rounded-md border border-neutral-200">
-              {items.map((item, index) => (
-                <li
-                  key={item.candidateId}
-                  className="flex items-center gap-3 px-3 py-2.5"
-                >
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium text-neutral-900">
-                      {index + 1}. {item.file.name}
-                    </span>
-                    <span className="block text-xs text-neutral-500">
-                      {formatBytes(item.file.size)} · {item.candidateId}
-                      {item.message ? ` · ${item.message}` : ""}
-                    </span>
-                  </span>
-                  <span
-                    className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-semibold ${STATUS_STYLES[item.status]}`}
+            <>
+              <p aria-live="polite" className="mt-3 text-sm font-medium text-neutral-700">
+                {items.length} resume{items.length === 1 ? "" : "s"} ready
+              </p>
+              <ul
+                aria-label="Selected resumes"
+                className="mt-2 max-h-72 divide-y divide-neutral-200 overflow-y-auto rounded-md border border-neutral-200"
+              >
+                {items.map((item, index) => (
+                  <li
+                    key={item.candidateId}
+                    className="flex items-center gap-3 bg-white px-3 py-2.5"
                   >
-                    {STATUS_LABEL[item.status]}
-                  </span>
-                  {!isProcessing && !isComplete && (
-                    <button
-                      type="button"
-                      onClick={() => removeFile(item.candidateId)}
-                      aria-label={`Remove ${item.file.name}`}
-                      className="shrink-0 rounded-md px-2 py-1 text-sm font-medium text-neutral-500 hover:bg-neutral-100 hover:text-neutral-900"
+                    <span
+                      aria-hidden="true"
+                      className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[11px] font-semibold ${
+                        item.kind === "PDF"
+                          ? "border-neutral-300 bg-neutral-100 text-neutral-800"
+                          : "border-neutral-200 bg-white text-neutral-600"
+                      }`}
                     >
-                      Remove
-                    </button>
-                  )}
-                </li>
-              ))}
-            </ul>
+                      {item.kind}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium text-neutral-900">
+                        {index + 1}. {item.file.name}
+                      </span>
+                      <span className="block text-xs text-neutral-500">
+                        {formatBytes(item.file.size)} · {item.candidateId}
+                        {item.message ? ` · ${item.message}` : ""}
+                      </span>
+                    </span>
+                    <span
+                      className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-semibold ${STATUS_STYLES[item.status]}`}
+                    >
+                      {STATUS_LABEL[item.status]}
+                    </span>
+                    {!isProcessing && !isComplete && (
+                      <button
+                        type="button"
+                        onClick={() => removeFile(item.candidateId)}
+                        aria-label={`Remove ${item.file.name} (${item.kind}, ${formatBytes(item.file.size)})`}
+                        className="shrink-0 rounded-md px-2 py-1 text-sm font-medium text-neutral-500 hover:bg-neutral-100 hover:text-neutral-900"
+                      >
+                        <span aria-hidden="true">×</span>
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </>
           )}
         </section>
 
@@ -525,10 +639,10 @@ export default function UploadForm() {
         {!isComplete && (
           <button
             type="submit"
-            disabled={isProcessing}
-            className="w-full rounded-md bg-neutral-900 px-4 py-3 text-base font-semibold text-white transition-opacity hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto sm:min-w-64"
+            disabled={isProcessing || items.length === 0}
+            className="w-full rounded-md bg-neutral-900 px-4 py-3 text-base font-semibold text-white shadow-[0_2px_8px_rgba(0,0,0,0.12)] transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto sm:min-w-64"
           >
-            {isProcessing ? "Screening in progress…" : "Screen resumes"}
+            {isProcessing ? "Screening in progress…" : ctaLabel}
           </button>
         )}
       </form>
@@ -537,12 +651,15 @@ export default function UploadForm() {
       {(isProcessing || isComplete) && items.length > 0 && (
         <section
           aria-label="Batch progress"
-          className="flex flex-col gap-4 rounded-lg border border-neutral-200 bg-white px-5 py-4"
+          className="flex flex-col gap-4 rounded-lg border border-neutral-200 bg-white px-5 py-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)]"
         >
           <div>
-            <h2 className="text-sm font-semibold tracking-tight text-neutral-900">
+            <p className="text-xs font-semibold tracking-wide text-neutral-500 uppercase">
+              AI screening pipeline
+            </p>
+            <h2 className="mt-1 text-base font-semibold tracking-tight text-neutral-900">
               {isProcessing && activeIndex !== null
-                ? `Processing ${activeIndex + 1} of ${items.length}`
+                ? `Processing ${activeIndex + 1} of ${items.length} — ${items[activeIndex]?.file.name}`
                 : `Screening complete — ${items.length} resume${items.length === 1 ? "" : "s"}`}
             </h2>
             <p aria-live="polite" className="mt-1 text-sm text-neutral-600">

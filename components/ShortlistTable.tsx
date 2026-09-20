@@ -79,14 +79,14 @@ export default function ShortlistTable({
             const shown = skills.slice(0, MAX_SKILLS_SHOWN);
             return (
               <tr key={row.id} className="align-top hover:bg-neutral-50">
-                <td className="px-4 py-3 text-base font-semibold text-neutral-900 tabular-nums">
+                <td className="px-4 py-3 text-xl font-bold text-neutral-900 tabular-nums">
                   {index + 1}
                 </td>
                 <td className="px-4 py-3">
                   <span className="block text-xs text-neutral-500">
                     Candidate
                   </span>
-                  <span className="block font-mono text-sm font-medium break-all text-neutral-900">
+                  <span className="block font-mono text-sm font-semibold break-all text-neutral-900">
                     {candidateId}
                   </span>
                 </td>
