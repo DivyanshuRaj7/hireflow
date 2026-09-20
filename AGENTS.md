@@ -178,3 +178,5 @@ time allows, since their backends don't exist yet.
 - [ ] NL query box — omit or stub, endpoint doesn't exist yet
 - [ ] Interview notes form — omit or stub, endpoint doesn't exist yet
 - [ ] Pipeline status indicator (real stages, not a generic spinner)
+
+
